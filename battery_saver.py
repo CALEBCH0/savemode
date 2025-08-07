@@ -151,6 +151,11 @@ class ProcessManager:
 class GPUManager:
     def __init__(self):
         self.nvidia_smi_path = self._find_nvidia_smi()
+        self.min_power_limit = None
+        self.max_power_limit = None
+        self.default_power_limit = None
+        if self.nvidia_smi_path:
+            self._get_power_limits()
     
     def _find_nvidia_smi(self) -> Optional[str]:
         common_paths = [
@@ -172,19 +177,43 @@ class GPUManager:
         logger.warning("nvidia-smi not found. GPU power management will be limited.")
         return None
     
+    def _get_power_limits(self):
+        try:
+            result = subprocess.run([
+                self.nvidia_smi_path,
+                "--query-gpu=power.min_limit,power.max_limit,power.default_limit,power.limit",
+                "--format=csv,noheader,nounits"
+            ], capture_output=True, text=True, check=True)
+            
+            values = result.stdout.strip().split(', ')
+            if len(values) >= 3:
+                self.min_power_limit = float(values[0])
+                self.max_power_limit = float(values[1])
+                self.default_power_limit = float(values[2])
+                if len(values) >= 4:
+                    current_limit = float(values[3])
+                    logger.info(f"GPU Power Limits - Min: {self.min_power_limit}W, Max: {self.max_power_limit}W, Default: {self.default_power_limit}W, Current: {current_limit}W")
+                else:
+                    logger.info(f"GPU Power Limits - Min: {self.min_power_limit}W, Max: {self.max_power_limit}W, Default: {self.default_power_limit}W")
+        except Exception as e:
+            logger.warning(f"Could not query GPU power limits: {e}")
+            self.min_power_limit = 60
+            self.max_power_limit = 105
+            self.default_power_limit = 85
+    
     def set_power_mode(self, profile: PowerProfile):
         if not self.nvidia_smi_path:
             return
         
         if profile == PowerProfile.BATTERY_SAVER:
-            power_limit = 60
+            power_limit = self.min_power_limit or 60
         else:
-            power_limit = 105
+            power_limit = self.max_power_limit or 105
         
         try:
             subprocess.run([
                 self.nvidia_smi_path,
-                "-pl", str(power_limit)
+                "-pl", str(int(power_limit))
             ], check=True)
             logger.info(f"Set GPU power limit to {power_limit}W")
         except Exception as e:
@@ -332,10 +361,19 @@ class BatterySaverApp:
         profile = self.profile_manager.current_profile
         settings = self.profile_manager.profiles[profile.value]
         
+        gpu_manager = self.profile_manager.gpu_manager
+        if profile == PowerProfile.BATTERY_SAVER:
+            actual_gpu_limit = gpu_manager.min_power_limit or settings['gpu_power_limit']
+        else:
+            actual_gpu_limit = gpu_manager.max_power_limit or settings['gpu_power_limit']
+        
         details = f"""Brightness: {settings['brightness']}%
 Target Refresh Rate: {settings['refresh_rate']}Hz
 Kill Bloatware: {'Yes' if settings['kill_bloatware'] else 'No'}
-GPU Power Limit: {settings['gpu_power_limit']}W"""
+GPU Power Limit: {actual_gpu_limit}W"""
+        
+        if gpu_manager.min_power_limit and gpu_manager.max_power_limit:
+            details += f"\n(GPU Range: {gpu_manager.min_power_limit}W - {gpu_manager.max_power_limit}W)"
         
         self.details_text.config(state='normal')
         self.details_text.delete(1.0, tk.END)
