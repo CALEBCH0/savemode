@@ -244,6 +244,7 @@ class ProfileManager:
         self.config_file = Path.home() / ".battery_saver_config.json"
         self.profiles = self._load_profiles()
         self.current_profile = PowerProfile.PERFORMANCE
+        self.last_errors = []
         
         self.power_manager = PowerManager()
         self.display_manager = DisplayManager()
@@ -281,18 +282,50 @@ class ProfileManager:
     
     def apply_profile(self, profile: PowerProfile):
         settings = self.profiles[profile.value]
+        self.last_errors = []
+        successes = []
         
-        self.power_manager.set_power_plan(profile)
+        try:
+            self.power_manager.set_power_plan(profile)
+            successes.append("Power plan")
+        except Exception as e:
+            self.last_errors.append(f"Power plan: {str(e)}")
+            logger.error(f"Failed to set power plan: {e}")
         
-        self.display_manager.set_brightness(settings["brightness"])
+        try:
+            self.display_manager.set_brightness(settings["brightness"])
+            successes.append("Brightness")
+        except Exception as e:
+            error_msg = str(e)
+            if "0x8004100c" in error_msg or "WMI" in error_msg:
+                self.last_errors.append("Brightness: Not supported on this display")
+            else:
+                self.last_errors.append(f"Brightness: {error_msg}")
         
         if settings.get("kill_bloatware", False):
-            self.process_manager.kill_bloatware()
+            try:
+                killed = self.process_manager.kill_bloatware()
+                if killed:
+                    successes.append(f"Killed {len(killed)} processes")
+            except Exception as e:
+                self.last_errors.append(f"Process management: {str(e)}")
         
-        self.gpu_manager.set_power_mode(profile)
+        try:
+            self.gpu_manager.set_power_mode(profile)
+            if self.gpu_manager.min_power_limit or self.gpu_manager.max_power_limit:
+                successes.append("GPU power")
+        except Exception as e:
+            if "not supported" not in str(e).lower():
+                self.last_errors.append(f"GPU: {str(e)}")
         
         self.current_profile = profile
-        logger.info(f"Applied {profile.value} profile")
+        
+        if self.last_errors:
+            logger.warning(f"Applied {profile.value} profile with errors: {', '.join(self.last_errors)}")
+        else:
+            logger.info(f"Successfully applied {profile.value} profile")
+        
+        return successes, self.last_errors
 
 
 class BatterySaverApp:
@@ -317,7 +350,7 @@ class BatterySaverApp:
     
     def setup_ui(self):
         self.root.title("Battery Saver - Zephyrus G16")
-        self.root.geometry("400x300")
+        self.root.geometry("450x400")
         self.root.resizable(False, False)
         
         style = ttk.Style()
@@ -408,8 +441,8 @@ GPU Power Limit: {actual_gpu_limit}W"""
                 import pythoncom
                 pythoncom.CoInitialize()
                 
-                self.profile_manager.apply_profile(profile)
-                self.root.after(0, self.on_profile_applied, profile)
+                successes, errors = self.profile_manager.apply_profile(profile)
+                self.root.after(0, self.on_profile_applied, profile, successes, errors)
                 
                 pythoncom.CoUninitialize()
             except Exception as e:
@@ -419,12 +452,22 @@ GPU Power Limit: {actual_gpu_limit}W"""
         thread.daemon = True
         thread.start()
     
-    def on_profile_applied(self, profile: PowerProfile):
+    def on_profile_applied(self, profile: PowerProfile, successes: List[str], errors: List[str]):
         self.progress_bar.stop()
         self.progress_bar.grid_remove()
         self.status_label.config(text=f"Current Profile: {profile.value.upper()}")
         self.update_details()
-        messagebox.showinfo("Success", f"{profile.value.title()} profile applied successfully!")
+        
+        if errors:
+            title = "Partial Success"
+            icon = messagebox.WARNING
+            message = f"{profile.value.title()} profile partially applied.\n\n"
+            if successes:
+                message += f"✓ Succeeded: {', '.join(successes)}\n\n"
+            message += f"✗ Failed:\n" + "\n".join(f"  • {error}" for error in errors)
+            messagebox.showwarning(title, message)
+        else:
+            messagebox.showinfo("Success", f"{profile.value.title()} profile applied successfully!\n\n✓ " + "\n✓ ".join(successes))
     
     def on_profile_error(self, error_msg: str):
         self.progress_bar.stop()
