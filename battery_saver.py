@@ -187,22 +187,35 @@ class GPUManager:
             
             values = result.stdout.strip().split(', ')
             if len(values) >= 3:
-                self.min_power_limit = float(values[0])
-                self.max_power_limit = float(values[1])
-                self.default_power_limit = float(values[2])
-                if len(values) >= 4:
-                    current_limit = float(values[3])
-                    logger.info(f"GPU Power Limits - Min: {self.min_power_limit}W, Max: {self.max_power_limit}W, Default: {self.default_power_limit}W, Current: {current_limit}W")
-                else:
-                    logger.info(f"GPU Power Limits - Min: {self.min_power_limit}W, Max: {self.max_power_limit}W, Default: {self.default_power_limit}W")
+                try:
+                    if values[0] != '[N/A]':
+                        self.min_power_limit = float(values[0])
+                    if values[1] != '[N/A]':
+                        self.max_power_limit = float(values[1])
+                    if values[2] != '[N/A]':
+                        self.default_power_limit = float(values[2])
+                    if len(values) >= 4 and values[3] != '[N/A]':
+                        current_limit = float(values[3])
+                        logger.info(f"GPU Power Limits - Min: {self.min_power_limit}W, Max: {self.max_power_limit}W, Default: {self.default_power_limit}W, Current: {current_limit}W")
+                    elif self.min_power_limit or self.max_power_limit:
+                        logger.info(f"GPU Power Limits - Min: {self.min_power_limit}W, Max: {self.max_power_limit}W, Default: {self.default_power_limit}W")
+                except ValueError:
+                    pass
         except Exception as e:
             logger.warning(f"Could not query GPU power limits: {e}")
-            self.min_power_limit = 60
-            self.max_power_limit = 105
-            self.default_power_limit = 85
+        
+        if not self.min_power_limit:
+            logger.info("GPU power limiting not supported on this device")
+            self.min_power_limit = None
+            self.max_power_limit = None
+            self.default_power_limit = None
     
     def set_power_mode(self, profile: PowerProfile):
         if not self.nvidia_smi_path:
+            return
+        
+        if not self.min_power_limit and not self.max_power_limit:
+            logger.info("GPU power limiting not supported - skipping")
             return
         
         if profile == PowerProfile.BATTERY_SAVER:
@@ -211,11 +224,17 @@ class GPUManager:
             power_limit = self.max_power_limit or 105
         
         try:
-            subprocess.run([
+            result = subprocess.run([
                 self.nvidia_smi_path,
                 "-pl", str(int(power_limit))
-            ], check=True)
-            logger.info(f"Set GPU power limit to {power_limit}W")
+            ], capture_output=True, text=True)
+            
+            if "not supported" in result.stderr.lower() or "not supported" in result.stdout.lower():
+                logger.info("GPU power limiting not supported on this device")
+            elif result.returncode == 0:
+                logger.info(f"Set GPU power limit to {power_limit}W")
+            else:
+                logger.warning(f"Could not set GPU power limit: {result.stderr}")
         except Exception as e:
             logger.error(f"Failed to set GPU power mode: {e}")
 
@@ -386,8 +405,13 @@ GPU Power Limit: {actual_gpu_limit}W"""
         
         def apply():
             try:
+                import pythoncom
+                pythoncom.CoInitialize()
+                
                 self.profile_manager.apply_profile(profile)
                 self.root.after(0, self.on_profile_applied, profile)
+                
+                pythoncom.CoUninitialize()
             except Exception as e:
                 self.root.after(0, self.on_profile_error, str(e))
         
