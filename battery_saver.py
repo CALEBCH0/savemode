@@ -101,6 +101,9 @@ class PowerManager:
 class DisplayManager:
     def __init__(self):
         self.wmi_available = self._check_wmi()
+        self.brightness_supported = False
+        self.refresh_rates = []
+        self._check_display_capabilities()
     
     def _check_wmi(self) -> bool:
         try:
@@ -110,7 +113,40 @@ class DisplayManager:
             logger.warning("WMI module not available. Some display features may be limited.")
             return False
     
+    def _check_display_capabilities(self):
+        # Check if brightness control is supported
+        try:
+            if self.wmi_available:
+                import wmi
+                c = wmi.WMI(namespace='wmi')
+                brightness_methods = c.WmiMonitorBrightnessMethods()
+                if brightness_methods:
+                    self.brightness_supported = True
+                    logger.info("Brightness control is supported")
+        except:
+            self.brightness_supported = False
+            logger.info("Brightness control not supported on this display")
+        
+        # Get supported refresh rates
+        try:
+            result = subprocess.run([
+                "wmic", "path", "Win32_VideoController", "get", "CurrentRefreshRate,MinRefreshRate,MaxRefreshRate"
+            ], capture_output=True, text=True)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if len(lines) > 1:
+                    values = lines[1].split()
+                    if values and values[0].isdigit():
+                        current_rate = int(values[0])
+                        self.refresh_rates.append(current_rate)
+                        logger.info(f"Current refresh rate: {current_rate}Hz")
+        except:
+            pass
+    
     def set_brightness(self, level: int):
+        if not self.brightness_supported:
+            raise Exception("Brightness control not supported on this display")
+        
         level = max(0, min(100, level))
         
         if self.wmi_available:
@@ -120,8 +156,12 @@ class DisplayManager:
                 methods = c.WmiMonitorBrightnessMethods()[0]
                 methods.WmiSetBrightness(level, 0)
                 logger.info(f"Set brightness to {level}%")
+                return True
             except Exception as e:
-                logger.error(f"Failed to set brightness via WMI: {e}")
+                error_msg = str(e)
+                if "0x8004100c" in error_msg:
+                    raise Exception("Brightness control not supported on this display")
+                raise e
         else:
             try:
                 subprocess.run([
@@ -129,8 +169,9 @@ class DisplayManager:
                     f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{level})"
                 ], check=True)
                 logger.info(f"Set brightness to {level}%")
+                return True
             except Exception as e:
-                logger.error(f"Failed to set brightness: {e}")
+                raise Exception("Brightness control not supported on this display")
     
     def set_refresh_rate(self, rate: int):
         try:
@@ -453,18 +494,38 @@ class BatterySaverApp:
         settings = self.profile_manager.profiles[profile.value]
         
         gpu_manager = self.profile_manager.gpu_manager
-        if profile == PowerProfile.BATTERY_SAVER:
-            actual_gpu_limit = gpu_manager.min_power_limit or settings['gpu_power_limit']
+        display_manager = self.profile_manager.display_manager
+        
+        # Brightness display
+        if display_manager.brightness_supported:
+            brightness_text = f"{settings['brightness']}%"
         else:
-            actual_gpu_limit = gpu_manager.max_power_limit or settings['gpu_power_limit']
+            brightness_text = "N/A (Not supported)"
         
-        details = f"""Brightness: {settings['brightness']}%
-Target Refresh Rate: {settings['refresh_rate']}Hz
+        # GPU power limit display
+        if gpu_manager.min_power_limit or gpu_manager.max_power_limit:
+            if profile == PowerProfile.BATTERY_SAVER:
+                gpu_limit_text = f"{gpu_manager.min_power_limit}W"
+            else:
+                gpu_limit_text = f"{gpu_manager.max_power_limit}W"
+            gpu_range_text = f"\n(GPU Range: {gpu_manager.min_power_limit}W - {gpu_manager.max_power_limit}W)"
+        else:
+            gpu_limit_text = "N/A (Not supported)"
+            gpu_range_text = ""
+        
+        # Refresh rate display
+        if display_manager.refresh_rates:
+            refresh_text = f"{settings['refresh_rate']}Hz (Current: {display_manager.refresh_rates[0]}Hz)"
+        else:
+            refresh_text = f"{settings['refresh_rate']}Hz"
+        
+        details = f"""Brightness: {brightness_text}
+Target Refresh Rate: {refresh_text}
 Kill Bloatware: {'Yes' if settings['kill_bloatware'] else 'No'}
-GPU Power Limit: {actual_gpu_limit}W"""
+GPU Power Limit: {gpu_limit_text}"""
         
-        if gpu_manager.min_power_limit and gpu_manager.max_power_limit:
-            details += f"\n(GPU Range: {gpu_manager.min_power_limit}W - {gpu_manager.max_power_limit}W)"
+        if gpu_range_text:
+            details += gpu_range_text
         
         self.details_text.config(state='normal')
         self.details_text.delete(1.0, tk.END)
