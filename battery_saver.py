@@ -40,28 +40,62 @@ class PowerManager:
     def _get_power_plans(self) -> Dict[str, str]:
         output = self._run_powershell("powercfg /list")
         plans = {}
+        
+        # Use standard Windows power scheme GUIDs
+        standard_guids = {
+            '381b4222-f694-41f0-9685-ff5bb260df2e': 'balanced',
+            '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c': 'performance',
+            'a1841308-3541-4fab-bc81-f71556f20b4a': 'saver'
+        }
+        
         for line in output.split('\n'):
             if 'GUID:' in line:
-                parts = line.split()
-                if len(parts) >= 2:
-                    guid = parts[1]
-                    if 'Balanced' in line:
-                        plans['balanced'] = guid
-                    elif 'High performance' in line:
-                        plans['performance'] = guid
-                    elif 'Power saver' in line:
-                        plans['saver'] = guid
+                for guid, plan_type in standard_guids.items():
+                    if guid in line:
+                        plans[plan_type] = guid
+                        logger.info(f"Found {plan_type} power plan: {guid}")
+        
+        # Fallback: try to detect by keywords in any language
+        if not plans:
+            for line in output.split('\n'):
+                if 'GUID:' in line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        guid = parts[1]
+                        # Check for English or Korean keywords
+                        if any(keyword in line for keyword in ['Balanced', '균형']):
+                            plans['balanced'] = guid
+                        elif any(keyword in line for keyword in ['High performance', '고성능']):
+                            plans['performance'] = guid
+                        elif any(keyword in line for keyword in ['Power saver', '절전']):
+                            plans['saver'] = guid
+        
         return plans
     
     def set_power_plan(self, profile: PowerProfile):
+        # Use built-in Windows scheme aliases instead of GUIDs
+        # Note: The naming is counterintuitive!
+        # SCHEME_MAX = Power Saver (MAXimum power saving)
+        # SCHEME_MIN = High Performance (MINimum power saving)
+        # SCHEME_BALANCED = Balanced
         if profile == PowerProfile.BATTERY_SAVER:
-            plan_guid = self.power_plans.get('saver', self.power_plans.get('balanced'))
+            scheme = "SCHEME_MAX"  # Power Saver
         else:
-            plan_guid = self.power_plans.get('performance', self.power_plans.get('balanced'))
+            scheme = "SCHEME_MIN"  # High Performance
         
-        if plan_guid:
-            self._run_powershell(f"powercfg /setactive {plan_guid}")
-            logger.info(f"Set power plan to {profile.value}")
+        result = self._run_powershell(f"powercfg /setactive {scheme}")
+        if result or result == "":
+            logger.info(f"Set power plan to {profile.value} using {scheme}")
+        else:
+            # Fallback to GUID method if aliases don't work
+            if profile == PowerProfile.BATTERY_SAVER:
+                plan_guid = self.power_plans.get('saver', self.power_plans.get('balanced'))
+            else:
+                plan_guid = self.power_plans.get('performance', self.power_plans.get('balanced'))
+            
+            if plan_guid:
+                self._run_powershell(f"powercfg /setactive {plan_guid}")
+                logger.info(f"Set power plan to {profile.value} using GUID")
 
 
 class DisplayManager:
