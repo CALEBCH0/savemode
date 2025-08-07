@@ -359,6 +359,11 @@ class BatterySaverApp:
         main_frame = ttk.Frame(self.root, padding="20")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
+        # Configure grid weights for expansion
+        self.root.rowconfigure(0, weight=1)
+        self.root.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(4, weight=1)
+        
         title_label = ttk.Label(
             main_frame,
             text="Power Profile Manager",
@@ -394,10 +399,10 @@ class BatterySaverApp:
         )
         
         details_frame = ttk.LabelFrame(main_frame, text="Profile Settings", padding="10")
-        details_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        details_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=10)
         
-        self.details_text = tk.Text(details_frame, height=6, width=45, state='disabled')
-        self.details_text.pack()
+        self.details_text = tk.Text(details_frame, height=8, width=50, state='disabled')
+        self.details_text.pack(fill=tk.BOTH, expand=True)
         
         self.update_details()
         
